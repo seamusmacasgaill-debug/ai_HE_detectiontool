@@ -194,10 +194,10 @@ Before proceeding to Sprint 1, **all** of the following must be confirmed:
 
 | Week   | Task                    | Deliverables                                                                                                                                         |
 |--------|-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Week 3 | Flask API Development   | - Create REST API endpoints<br>- Implement file upload handling<br>- Build batch processing capability<br>- Setup error handling and logging         |
+| Week 3 | Flask API Development   | - Create REST API endpoints (including `/api/v1/analyse/file`, `/api/v1/analyse/text`, `/api/v1/upload/validate`)<br>- Implement file upload handling (multipart, MIME validation via python-magic, ClamAV scanning, 25 MB limit, filename sanitisation)<br>- Build batch upload endpoint (`/api/v1/batch/upload`, max 50 files / 500 MB)<br>- Setup error handling and logging         |
 | Week 3 | Database Integration    | - Design results storage schema<br>- Implement PostgreSQL connection<br>- Create data persistence layer<br>- Build query optimization                |
 | Week 4 | Frontend Development    | - Design responsive UI/UX<br>- Implement HTML/CSS interface<br>- Create JavaScript analysis client<br>- Build results visualization                 |
-| Week 4 | API Testing             | - Write API integration tests<br>- Perform load testing<br>- Test file upload limits<br>- Validate error responses                                  |
+| Week 4 | API Testing             | - Write API integration tests<br>- Perform load testing<br>- Test file upload limits (25 MB single, 50 files/500 MB batch, rate limiting, all file types, malware rejection, scanned PDF rejection)<br>- Validate all error responses against File Upload Specification error messages                                  |
 
 ### Sprint 5-6: Advanced Features & Testing
 
@@ -284,7 +284,7 @@ All testing infrastructure, tooling, and standards must be established **before 
 | Human-Written Samples | 250 documents | Genuine student submissions across HE levels 4-8 (anonymised, consented) | Academic Liaison |
 | Mixed/Paraphrased Samples | 100 documents | AI-generated text edited by humans, or human text run through paraphrasing tools | ML Lead |
 | Edge Cases | 50 documents | Very short texts (<200 words), non-English fragments, heavily cited work, code-heavy submissions | QA Lead |
-| Batch Test Set | 500 files | Mixed formats (.docx, .pdf, .txt) for batch upload and processing testing | QA Lead |
+| Batch Test Set | 500 files | Mixed formats (.docx, .pdf, .txt, .rtf, .odt) for batch upload and processing testing. Must include: oversized files (>25 MB), scanned PDFs, empty files, <50 word files, >50,000 word files, legacy .doc files, non-UTF-8 .txt files, files with special characters in filenames | QA Lead |
 
 #### Quality Gate Definitions
 
@@ -395,7 +395,7 @@ All design foundations must be established **before Sprint 1 begins**. No fronte
 | Colour Palette | Primary, secondary, semantic (success/warning/error/info), WCAG AA contrast ratios verified | UX Lead | Palette documented with hex/RGB values and contrast ratios |
 | Typography | System font stack (fallback-safe), heading hierarchy (h1-h4), body/caption sizes, minimum 16px body | UX Lead | Type scale documented |
 | Spacing & Grid | 8px base unit, 12-column responsive grid, breakpoints at 320px / 768px / 1024px / 1440px | UX Lead | Grid spec documented |
-| Component Library | Buttons, inputs, selects, modals, cards, tables, alerts, progress indicators, file upload zones | Frontend Lead | Components built in HTML/CSS, documented with usage guidelines |
+| Component Library | Buttons, inputs, selects, modals, cards, tables, alerts, progress indicators (linear + circular), file upload zone (single drag-and-drop), batch upload zone (multi-file drag-and-drop), file list table with per-file status/actions, toast notifications | Frontend Lead | Components built in HTML/CSS, documented with usage guidelines |
 | Iconography | Consistent icon set (e.g., Lucide, Phosphor), minimum 24x24 touch target | UX Lead | Icon set selected and documented |
 | Data Visualisation | Chart styles for confidence scores, HE level breakdowns, batch summaries (colour-blind safe palettes) | UX Lead | Chart style guide with accessible colour variants |
 
@@ -432,13 +432,122 @@ All design foundations must be established **before Sprint 1 begins**. No fronte
 | Admin: User Management | 1. Navigate to admin dashboard<br>2. View/search users<br>3. Add/edit/deactivate accounts<br>4. Assign roles (Admin/Educator/Reviewer)<br>5. Confirm changes |
 | Error Recovery | 1. User encounters error (upload fails, analysis times out)<br>2. Clear error message with reason displayed<br>3. Actionable suggestion shown (retry, reduce file size, contact support)<br>4. One-click retry available |
 
+### File Upload Specification
+
+File upload is a core user interaction across both single and batch analysis. The following defines the complete upload experience, constraints, validation, and error handling.
+
+#### Supported File Types
+
+| File Type | MIME Type | Extension | Max Size | Notes |
+|-----------|-----------|-----------|----------|-------|
+| Microsoft Word | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | `.docx` | 25 MB | Primary academic submission format. `.doc` (legacy) not supported — prompt user to save as `.docx` |
+| PDF | `application/pdf` | `.pdf` | 25 MB | Text-based PDFs only. Scanned/image-only PDFs rejected with clear message to use OCR first |
+| Plain Text | `text/plain` | `.txt` | 10 MB | UTF-8 encoding assumed. Non-UTF-8 files re-encoded with warning |
+| Rich Text | `application/rtf` | `.rtf` | 15 MB | Converted to plain text server-side before analysis |
+| OpenDocument Text | `application/vnd.oasis.opendocument.text` | `.odt` | 25 MB | Common in open-source environments used by some institutions |
+
+**Explicitly unsupported** (with user-facing message): `.doc` (legacy Word), `.pages` (Apple), `.html`, `.epub`, image files (`.jpg`, `.png`), spreadsheets, presentations, archives (`.zip`, `.rar`)
+
+#### Document Size Limits
+
+| Constraint | Limit | Behaviour When Exceeded |
+|-----------|-------|------------------------|
+| Max file size (single upload) | 25 MB | Upload rejected client-side before transmission. Error: "File exceeds the 25 MB limit. Please reduce the file size or split into smaller documents." |
+| Max file size (batch per file) | 25 MB per file | Individual file flagged in file list. Other files in batch proceed normally |
+| Max word count (per document) | 50,000 words | Analysis proceeds but with warning: "This document exceeds 50,000 words. Analysis may take longer than usual." Timeout extended to 30 seconds |
+| Min word count (per document) | 50 words | Analysis proceeds but with warning: "This document contains fewer than 50 words. Results may be less reliable for very short texts." |
+| Recommended word count | 500 - 5,000 words | Optimal accuracy range. No warning displayed |
+| Max batch size (file count) | 50 files per batch | Upload rejected if >50 files selected. Error: "Maximum 50 files per batch. Please split your submission into multiple batches." |
+| Max batch size (total) | 500 MB total | Upload rejected if total exceeds 500 MB. Error: "Total batch size exceeds 500 MB. Please reduce the number or size of files." |
+
+#### Single File Upload (Homepage — Sprint 4)
+
+| Component | Specification |
+|-----------|---------------|
+| **Upload zone** | Combined drag-and-drop zone + click-to-browse button. Dashed border, icon, "Drag a file here or click to browse" label |
+| **Drag-and-drop** | Supported on Homepage (not just Batch page). Drop zone highlights on drag-over (border colour change, background tint). Visual feedback: "Drop file to upload" |
+| **Text paste alternative** | Large text area adjacent to / tabbed with upload zone. Labelled "Paste text directly". Auto-detects word count on paste. Mutually exclusive with file upload (selecting one clears the other) |
+| **File preview** | After selection: file name, file size, file type icon displayed. "Remove" button to clear selection |
+| **Progress indicator** | Circular progress spinner during upload + "Uploading..." label. For files >5 MB: percentage progress bar |
+| **Client-side validation** | Before upload: file type checked against allowed list, file size checked against 25 MB limit. Instant error display (no server round-trip) |
+| **Server-side validation** | After upload: MIME type verified (not just extension), file scanned for malware (ClamAV or equivalent), text extracted and word count checked |
+| **Keyboard accessible** | Upload zone focusable via Tab. Enter/Space opens file browser. Drop zone announces state changes to screen readers |
+| **Mobile behaviour** | Upload zone triggers native file picker. Camera/photo library options suppressed (document types only). Full-width button: "Upload Document" |
+
+#### Batch Upload (Batch Page — Sprint 5)
+
+| Component | Specification |
+|-----------|---------------|
+| **Drag-and-drop zone** | Large drop zone (minimum 200px height). Accepts multiple files simultaneously. "Drag files here or click to browse" with supported formats listed |
+| **Multi-file selection** | File browser opens with `multiple` attribute enabled. Shift-click and Ctrl-click selection supported natively |
+| **File list** | Sortable table showing: file name, file type (icon), file size, word count (after server-side extraction), status (queued / uploading / processing / complete / error) |
+| **Per-file status indicators** | Queued: grey clock icon. Uploading: blue progress bar. Processing: blue spinner. Complete: green tick. Error: red cross with tooltip showing error reason |
+| **Per-file actions** | "Remove" button per file (before submission). "Retry" button per file (after error). "View result" link per file (after completion) |
+| **Batch progress** | Overall progress bar: "X of Y files processed". Estimated time remaining displayed after first file completes |
+| **Batch settings** | HE level selector (applies to all files, or per-file override). Option: "Use same HE level for all files" (default) or "Set per file" |
+| **Submit behaviour** | "Start Analysis" button disabled until >=1 valid file uploaded. Confirmation if >20 files: "You are about to analyse X files. This may take approximately Y minutes. Continue?" |
+| **Background processing** | After submission, user can navigate away. Notification banner: "Batch analysis in progress — X of Y complete". Results available on Batch Results page |
+| **Partial failure handling** | If some files fail: batch continues. Failed files shown with error reason. "Retry failed files" button at batch level |
+
+#### File Validation & Error Messages
+
+| Validation | Check Point | Error Message | UX Behaviour |
+|-----------|------------|---------------|-------------|
+| Unsupported file type | Client-side (immediate) | "**{filename}** is not a supported file type. Please upload a .docx, .pdf, .txt, .rtf, or .odt file." | File not added to upload queue. Toast notification (auto-dismiss 8s) |
+| File too large | Client-side (immediate) | "**{filename}** ({filesize} MB) exceeds the 25 MB limit. Please reduce the file size or split into smaller documents." | File not added to upload queue. Toast notification |
+| Legacy .doc format | Client-side (immediate) | "**{filename}** is a legacy Word format (.doc). Please open the file in Word and save as .docx, then try again." | File not added to upload queue. Toast notification with help link |
+| Batch too many files | Client-side (immediate) | "You selected {count} files, but the maximum is 50 per batch. Please reduce the number of files." | Excess files not added. First 50 shown in file list |
+| Batch total too large | Client-side (after selection) | "Total batch size ({totalsize} MB) exceeds the 500 MB limit. Please remove some files to continue." | Submit button disabled. Files highlighted that could be removed |
+| MIME type mismatch | Server-side | "**{filename}** appears to be a different file type than its extension suggests. Please check the file and re-upload." | File marked as error in file list. Retry available |
+| Scanned/image PDF | Server-side (text extraction) | "**{filename}** appears to be a scanned document with no extractable text. Please use OCR software to convert it to a text-based PDF first." | File marked as error. Help link to OCR guidance |
+| Empty document | Server-side (text extraction) | "**{filename}** contains no readable text. Please check the file is not empty or corrupted." | File marked as error |
+| Below min word count | Server-side (post-extraction) | "**{filename}** contains only {count} words. Results may be less reliable for texts under 50 words." | Warning banner on results (not blocking). Analysis proceeds |
+| Above max word count | Server-side (post-extraction) | "**{filename}** contains {count} words (over 50,000). Analysis will proceed but may take longer." | Warning banner. Extended timeout applied |
+| Malware detected | Server-side (scan) | "**{filename}** could not be processed for security reasons. Please check the file and try again, or contact support." | File rejected. No detail given to user (security). Logged as P2 alert |
+| Upload network failure | Client-side (during transfer) | "Upload failed for **{filename}**. Please check your internet connection and try again." | Retry button displayed. File remains in queue |
+| Server processing timeout | Server-side | "Analysis of **{filename}** timed out. This can happen with very large or complex documents. Please try again or contact support." | Retry button. Logged for investigation |
+
+#### Upload API Endpoints
+
+| Endpoint | Method | Purpose | Auth Required | Rate Limit |
+|----------|--------|---------|:---:|------------|
+| `/api/v1/analyse/text` | POST | Submit plain text for analysis | Yes | 100 req/min per user |
+| `/api/v1/analyse/file` | POST | Upload single file for analysis | Yes | 10 files/min per user |
+| `/api/v1/batch/upload` | POST | Upload multiple files for batch processing | Yes | 5 batches/hour per user |
+| `/api/v1/batch/{batch_id}/status` | GET | Check batch processing status | Yes | 60 req/min per user |
+| `/api/v1/batch/{batch_id}/results` | GET | Retrieve batch results | Yes | 30 req/min per user |
+| `/api/v1/batch/{batch_id}/retry` | POST | Retry failed files in a batch | Yes | 10 req/hour per user |
+| `/api/v1/upload/validate` | POST | Client-side pre-validation (file type, size check without full upload) | Yes | 100 req/min per user |
+
+**Request format for `/api/v1/analyse/file`:**
+- Content-Type: `multipart/form-data`
+- Fields: `file` (binary), `he_level` (integer, 4-8), `options` (JSON, optional)
+
+**Request format for `/api/v1/batch/upload`:**
+- Content-Type: `multipart/form-data`
+- Fields: `files[]` (multiple binary), `he_level` (integer, 4-8 — default for all), `file_he_levels` (JSON map of filename→level, optional override)
+
+#### Upload Security
+
+| Measure | Implementation |
+|---------|---------------|
+| File type verification | Server-side MIME type check via `python-magic` (libmagic). Extension-only checks insufficient |
+| Malware scanning | All uploaded files scanned with ClamAV before processing. Quarantined if detected |
+| Filename sanitisation | Strip path components, special characters, and Unicode normalise. Generate internal UUID filename. Original name stored in metadata only |
+| Temporary storage | Uploaded files stored in encrypted temporary directory (`/tmp/uploads/{uuid}/`). Deleted after processing or within 1 hour (whichever is sooner) |
+| File size enforcement | Nginx `client_max_body_size` set to 30 MB (buffer above 25 MB limit). Flask `MAX_CONTENT_LENGTH` set to 25 MB. Gunicorn `--limit-request-line` configured |
+| Content-Type enforcement | `multipart/form-data` required. Reject requests with unexpected content types |
+| Anti-virus signature updates | ClamAV signature database updated daily (automated via `freshclam`) |
+
+---
+
 ### Page Inventory & Layout Requirements
 
 | Page | Primary Purpose | Key Components | Priority |
 |------|----------------|----------------|----------|
-| **Homepage / Dashboard** | Entry point, quick analysis | Text input area, file upload zone, HE level selector, recent analyses list | P1 — Sprint 4 |
+| **Homepage / Dashboard** | Entry point, quick analysis | Text paste area OR drag-and-drop file upload zone (mutually exclusive, tabbed), file preview with name/size/type, HE level selector (4-8), recent analyses list | P1 — Sprint 4 |
 | **Results View** | Display analysis outcome | Confidence score (visual gauge), category breakdown, phrase highlights, HE level assessment, export button | P1 — Sprint 4 |
-| **Batch Upload** | Multi-file processing | Drag-and-drop zone, file list with status indicators, progress bar, batch settings | P1 — Sprint 5 |
+| **Batch Upload** | Multi-file processing | Large drag-and-drop zone (multi-file), file list table (name, type, size, word count, status, per-file actions), overall progress bar with ETA, HE level selector (global or per-file), batch settings, submit/retry controls | P1 — Sprint 5 |
 | **Batch Results** | Aggregated outcomes | Summary statistics, sortable/filterable table, bulk export | P1 — Sprint 5 |
 | **PDF Report Preview** | Pre-export review | Report layout preview, customisation options (include/exclude sections), download button | P2 — Sprint 5 |
 | **User Dashboard** | Personal history | Analysis history (paginated), saved reports, account settings | P2 — Sprint 6 |
@@ -704,9 +813,9 @@ All infrastructure decisions, security policies, and operational procedures must
 | Category | Requirement | Validation | Sprint |
 |----------|------------|------------|--------|
 | **HTTP Headers** | `Strict-Transport-Security`, `Content-Security-Policy`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` | Automated header scan (SecurityHeaders.com) | Sprint 6 |
-| **Input Validation** | All user inputs validated server-side (file type, size, text length). Parameterised queries only (no string concatenation in SQL) | Bandit + manual code review | Sprint 3 onwards |
+| **Input Validation** | All user inputs validated server-side: file type (MIME via `python-magic`), size (25 MB/file, 500 MB/batch), word count (50-50,000), malware scan (ClamAV). Filename sanitised (UUID). Parameterised queries only (no string concatenation in SQL) | Bandit + manual code review | Sprint 3 onwards |
 | **CSRF Protection** | CSRF tokens on all state-changing forms. `SameSite=Strict` on session cookies | OWASP ZAP scan | Sprint 6 |
-| **Rate Limiting** | API: 100 requests/minute per user. File upload: 10 files/minute per user. Login: 5 attempts/15 minutes then lockout | Load test + manual verification | Sprint 3 |
+| **Rate Limiting** | API: 100 requests/minute per user. Single file upload: 10 files/minute per user. Batch upload: 5 batches/hour per user (max 50 files/batch). Login: 5 attempts/15 minutes then lockout | Load test + manual verification | Sprint 3 |
 | **Dependency Scanning** | Automated vulnerability scanning on all Python and JavaScript dependencies (Dependabot / Snyk) | CI pipeline check on every PR | Sprint 1 onwards |
 | **Container Security** | Base images from trusted sources only. No `latest` tags. Run as non-root user. Read-only filesystem where possible | Trivy scan in CI | Sprint 1 onwards |
 | **Logging & Audit** | All authentication events, role changes, data exports, and admin actions logged with timestamp, user ID, IP address | Log review + alerting rules | Sprint 6 |
